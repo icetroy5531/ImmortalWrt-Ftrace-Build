@@ -1,0 +1,238 @@
+
+name: Build ImmortalWrt 25.12.2 Ftrace
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt.git
+  REPO_TAG: v25.12.2
+  RELEASE_URL: https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo apt-get clean
+          df -h
+          free -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git \
+            libncurses-dev libssl-dev libelf-dev \
+            python3 python3-pyelftools python3-setuptools \
+            python3-dev python3-ply python3-docutils \
+            rsync unzip zlib1g-dev file wget curl \
+            ccache cmake cpio device-tree-compiler \
+            dwarves zstd libzstd-dev \
+            libglib2.0-dev libgmp3-dev libmpc-dev \
+            libmpfr-dev libreadline-dev \
+            ninja-build patch pkgconf qemu-utils \
+            swig texinfo u-boot-tools xmlto xxd
+
+      - name: Clone ImmortalWrt source
+        run: |
+          git clone --depth=1 \
+            -b "$REPO_TAG" \
+            "$REPO_URL" immortalwrt
+          cd immortalwrt
+          git rev-parse HEAD
+
+      - name: Install pinned feeds
+        working-directory: immortalwrt
+        run: |
+          wget -O feeds.conf \
+            "$RELEASE_URL/feeds.buildinfo"
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure firmware
+        working-directory: immortalwrt
+        run: |
+          cat > .config <<'EOF'
+          CONFIG_TARGET_x86=y
+          CONFIG_TARGET_x86_64=y
+          CONFIG_TARGET_x86_64_DEVICE_generic=y
+
+          CONFIG_IB=y
+          CONFIG_IB_STANDALONE=y
+          CONFIG_VERSION_FILENAMES=y
+
+          CONFIG_KERNEL_DEBUG_INFO=y
+          CONFIG_KERNEL_DEBUG_INFO_BTF=y
+          CONFIG_KERNEL_BPF_EVENTS=y
+          CONFIG_KERNEL_FTRACE=y
+          CONFIG_KERNEL_KPROBES=y
+          CONFIG_KERNEL_KPROBE_EVENTS=y
+          CONFIG_KERNEL_PERF_EVENTS=y
+          CONFIG_DWARVES=y
+
+          CONFIG_TARGET_ROOTFS_EXT4FS=y
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_GRUB_IMAGES=y
+          CONFIG_GRUB_EFI_IMAGES=y
+          CONFIG_TARGET_IMAGES_GZIP=y
+          CONFIG_TARGET_KERNEL_PARTSIZE=64
+          CONFIG_TARGET_ROOTFS_PARTSIZE=1024
+
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-ssl=y
+          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+
+          CONFIG_PACKAGE_ppp=y
+          CONFIG_PACKAGE_ppp-mod-pppoe=y
+          CONFIG_PACKAGE_kmod-pppoe=y
+
+          CONFIG_PACKAGE_odhcp6c=y
+          CONFIG_PACKAGE_odhcpd-ipv6only=y
+
+          CONFIG_PACKAGE_kmod-wireguard=y
+          CONFIG_PACKAGE_wireguard-tools=y
+          CONFIG_PACKAGE_luci-proto-wireguard=y
+
+          CONFIG_PACKAGE_kmod-nft-tproxy=y
+          CONFIG_PACKAGE_kmod-nft-socket=y
+          CONFIG_PACKAGE_kmod-nft-queue=y
+          CONFIG_PACKAGE_kmod-sched-core=y
+          CONFIG_PACKAGE_kmod-sched-bpf=m
+          CONFIG_PACKAGE_kmod-ifb=m
+
+          CONFIG_PACKAGE_kmod-igc=m
+          CONFIG_PACKAGE_kmod-igb=m
+          CONFIG_PACKAGE_kmod-e1000e=m
+          CONFIG_PACKAGE_kmod-r8169=m
+          CONFIG_PACKAGE_kmod-virtio-net=m
+
+          CONFIG_PACKAGE_ip-full=y
+          CONFIG_PACKAGE_tcpdump=m
+          CONFIG_PACKAGE_bind-dig=m
+          CONFIG_PACKAGE_bpftool=m
+
+          CONFIG_PACKAGE_smartdns=m
+          CONFIG_PACKAGE_luci-app-smartdns=m
+          CONFIG_PACKAGE_luci-i18n-smartdns-zh-cn=m
+          EOF
+
+          make defconfig
+
+          grep -x 'CONFIG_IB=y' .config
+          grep -x 'CONFIG_IB_STANDALONE=y' .config
+          grep -x 'CONFIG_KERNEL_DEBUG_INFO_BTF=y' .config
+
+      - name: Enable kernel function tracing
+        working-directory: immortalwrt
+        run: |
+          KCONFIG=target/linux/x86/64/config-6.12
+
+          test -f "$KCONFIG"
+
+          for SYMBOL in \
+            FTRACE \
+            FUNCTION_TRACER \
+            DYNAMIC_FTRACE \
+            FUNCTION_GRAPH_TRACER \
+            IKCONFIG \
+            IKCONFIG_PROC
+          do
+            sed -i \
+              -e "/^CONFIG_${SYMBOL}=/d" \
+              -e "/^# CONFIG_${SYMBOL} is not set$/d" \
+              "$KCONFIG"
+
+            echo "CONFIG_${SYMBOL}=y" >> "$KCONFIG"
+          done
+
+          git diff -- "$KCONFIG"
+
+      - name: Download source packages
+        working-directory: immortalwrt
+        run: |
+          make -j8 download V=s
+          df -h
+
+      - name: Compile firmware and ImageBuilder
+        working-directory: immortalwrt
+        run: |
+          set -o pipefail
+
+          make -j$(nproc) V=s 2>&1 | tee build.log
+
+          df -h
+
+      - name: Verify final kernel configuration
+        working-directory: immortalwrt
+        run: |
+          KCONFIG=$(find build_dir \
+            -path '*/linux-6.12*/.config' \
+            -type f | head -n 1)
+
+          test -n "$KCONFIG"
+
+          for SYMBOL in \
+            FTRACE \
+            FUNCTION_TRACER \
+            DYNAMIC_FTRACE \
+            DEBUG_INFO_BTF \
+            IKCONFIG_PROC
+          do
+            grep -x "CONFIG_${SYMBOL}=y" "$KCONFIG"
+          done
+
+          mkdir -p ../release
+          cp "$KCONFIG" ../release/kernel.config
+          cp .config ../release/firmware.config
+          cp feeds.conf ../release/feeds.conf
+
+      - name: Collect firmware files
+        working-directory: immortalwrt
+        run: |
+          OUT=bin/targets/x86/64
+
+          find "$OUT" -maxdepth 1 -type f
+
+          cp "$OUT"/*imagebuilder*.tar.zst ../release/
+          cp "$OUT"/*combined*.img.gz ../release/
+          cp "$OUT"/*.manifest ../release/
+          cp "$OUT"/profiles.json ../release/ 2>/dev/null || true
+
+          cd ../release
+          sha256sum * > SHA256SUMS
+          ls -lh
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="25.12.2-ftrace-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
+
+          gh release create "$TAG" release/* \
+            --title "ImmortalWrt ${TAG} x86_64" \
+            --notes "Experimental custom ImmortalWrt build with Ftrace, BTF and standalone ImageBuilder. Test before deployment." \
+            --prerelease
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-failure-log
+          path: immortalwrt/build.log
+          if-no-files-found: ignore
+          retention-days: 7
