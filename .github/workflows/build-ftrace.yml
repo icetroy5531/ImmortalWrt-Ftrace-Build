@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 env:
   REPO_URL: https://github.com/immortalwrt/immortalwrt.git
@@ -16,20 +16,11 @@ jobs:
   build:
     name: Build x86_64 Ftrace Firmware
     runs-on: ubuntu-24.04
-    timeout-minutes: 350
+    timeout-minutes: 355
 
     steps:
-
-      # ========================================
-      # 1. Checkout
-      # ========================================
-
       - name: Checkout
         uses: actions/checkout@v4
-
-      # ========================================
-      # 2. Free disk space
-      # ========================================
 
       - name: Free disk space
         run: |
@@ -38,32 +29,25 @@ jobs:
           sudo rm -rf /opt/ghc
           sudo rm -rf /usr/local/share/boost
           sudo apt-get clean
-
-          echo "===== Disk ====="
           df -h
-
-          echo "===== Memory ====="
           free -h
-
-      # ========================================
-      # 3. Install dependencies
-      # ========================================
-
+          nproc
 
       - name: Install build dependencies
         run: |
-          # Disable Microsoft's repository
+          # Disable unavailable Microsoft repositories
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list
           sudo rm -f /etc/apt/sources.list.d/vscode.list
 
-          sudo grep -rl 'packages.microsoft.com' \
-            /etc/apt/sources.list.d/ 2>/dev/null |
-            xargs -r sudo rm -f
+          while IFS= read -r file; do
+            sudo rm -f "$file"
+          done < <(
+            grep -rl 'packages.microsoft.com' \
+              /etc/apt/sources.list.d/ 2>/dev/null || true
+          )
 
-          # Update Ubuntu repositories
           sudo apt-get update
 
-          # Install ImmortalWrt build dependencies
           sudo apt-get install -y \
             build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git \
@@ -81,31 +65,18 @@ jobs:
             genisoimage xorriso \
             lib32gcc-s1 libc6-dev-i386
 
-          # Verify required tools
           pahole --version
           mkisofs --version
 
-
-      # ========================================
-      # 4. Clone source
-      # ========================================
-
       - name: Clone ImmortalWrt source
         run: |
-          git clone \
-            --depth=1 \
+          git clone --depth=1 \
             --branch "$REPO_TAG" \
             "$REPO_URL" immortalwrt
 
           cd immortalwrt
-
-          echo "===== Source Version ====="
           git describe --tags --always
           git rev-parse HEAD
-
-      # ========================================
-      # 5. Install pinned feeds
-      # ========================================
 
       - name: Install pinned feeds
         working-directory: immortalwrt
@@ -113,70 +84,35 @@ jobs:
           wget -qO feeds.conf \
             "$RELEASE_URL/feeds.buildinfo"
 
-          echo "===== Feeds ====="
           cat feeds.conf
 
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      # ========================================
-      # 6. Configure firmware
-      # ========================================
-
       - name: Configure firmware
         working-directory: immortalwrt
         run: |
-
-          # Start with official release configuration
           wget -qO .config \
             "$RELEASE_URL/config.buildinfo"
 
-          # Remove previous values to avoid conflicts
-          sed -i \
-            -e '/^CONFIG_KERNEL_DEBUG_INFO_REDUCED=/d' \
-            -e '/^# CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set$/d' \
-            .config
-
-          # Add custom kernel and package options
-          cat >> .config <<'EOF'
-
-          # ======================================
-          # ImageBuilder
-          # ======================================
-
+          cat > custom.config <<'EOF'
           CONFIG_IB=y
           CONFIG_IB_STANDALONE=y
-
-          # ======================================
-          # Kernel debug information and BTF
-          # ======================================
 
           CONFIG_KERNEL_DEBUG_INFO=y
           # CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set
           CONFIG_KERNEL_DEBUG_INFO_BTF=y
-
-          # ======================================
-          # Function tracing
-          # ======================================
 
           CONFIG_KERNEL_FTRACE=y
           CONFIG_KERNEL_FUNCTION_TRACER=y
           CONFIG_KERNEL_DYNAMIC_FTRACE=y
           CONFIG_KERNEL_FUNCTION_GRAPH_TRACER=y
 
-          # ======================================
-          # BPF and kernel probes
-          # ======================================
-
           CONFIG_KERNEL_DEBUG_FS=y
           CONFIG_KERNEL_BPF_EVENTS=y
           CONFIG_KERNEL_KPROBES=y
           CONFIG_KERNEL_PERF_EVENTS=y
           CONFIG_DWARVES=y
-
-          # ======================================
-          # Image format
-          # ======================================
 
           CONFIG_TARGET_ROOTFS_EXT4FS=y
           CONFIG_TARGET_ROOTFS_SQUASHFS=y
@@ -187,62 +123,67 @@ jobs:
           CONFIG_TARGET_KERNEL_PARTSIZE=128
           CONFIG_TARGET_ROOTFS_PARTSIZE=4096
 
-          # ======================================
-          # LuCI
-          # ======================================
-
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-ssl=y
           CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
 
-          # ======================================
-          # PPPoE and IPv6
-          # ======================================
-
           CONFIG_PACKAGE_ppp=y
           CONFIG_PACKAGE_ppp-mod-pppoe=y
           CONFIG_PACKAGE_kmod-pppoe=y
+
           CONFIG_PACKAGE_odhcp6c=y
           CONFIG_PACKAGE_odhcpd-ipv6only=y
-
-          # ======================================
-          # WireGuard
-          # ======================================
 
           CONFIG_PACKAGE_kmod-wireguard=y
           CONFIG_PACKAGE_wireguard-tools=y
           CONFIG_PACKAGE_luci-proto-wireguard=y
 
-          # ======================================
-          # Firewall and transparent proxy
-          # ======================================
-
           CONFIG_PACKAGE_kmod-nft-tproxy=y
           CONFIG_PACKAGE_kmod-nft-socket=y
           CONFIG_PACKAGE_kmod-nft-queue=y
-
-          # ======================================
-          # Network diagnostic tools
-          # ======================================
 
           CONFIG_PACKAGE_ip-full=y
           CONFIG_PACKAGE_tcpdump=m
           CONFIG_PACKAGE_bpftool=m
           CONFIG_PACKAGE_bind-dig=m
 
-          # ======================================
-          # DNS
-          # ======================================
-
           CONFIG_PACKAGE_smartdns=m
           CONFIG_PACKAGE_luci-app-smartdns=m
           CONFIG_PACKAGE_luci-i18n-smartdns-zh-cn=m
-
           EOF
 
-          # Resolve Kconfig dependencies
-          make defconfig
+          # Replace existing values instead of duplicating them
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
 
+          config = Path(".config")
+          original = config.read_text().splitlines()
+          custom = Path("custom.config").read_text().splitlines()
+
+          def symbol(line):
+              m = re.match(
+                  r"^(?:# )?(CONFIG_[A-Za-z0-9_.+\-]+)"
+                  r"(?:=| is not set$)", line
+              )
+              return m.group(1) if m else None
+
+          overrides = {
+              symbol(line): line
+              for line in custom
+              if symbol(line)
+          }
+
+          result = [
+              line for line in original
+              if symbol(line) not in overrides
+          ]
+
+          result.extend(overrides.values())
+          config.write_text("\n".join(result) + "\n")
+          PY
+
+          make defconfig
 
           echo "===== Verify target ====="
           grep -x 'CONFIG_TARGET_x86=y' .config
@@ -259,7 +200,7 @@ jobs:
 
           echo "===== Verify BTF and Ftrace ====="
 
-          for option in \
+          for OPTION in \
             CONFIG_KERNEL_DEBUG_INFO \
             CONFIG_KERNEL_DEBUG_INFO_BTF \
             CONFIG_KERNEL_FTRACE \
@@ -271,12 +212,11 @@ jobs:
             CONFIG_KERNEL_KPROBES \
             CONFIG_KERNEL_PERF_EVENTS
           do
-            if ! grep -qx "${option}=y" .config; then
-              echo "ERROR: ${option} is not enabled"
+            if ! grep -qx "${OPTION}=y" .config; then
+              echo "ERROR: ${OPTION} is not enabled"
               exit 1
             fi
-
-            echo "OK: ${option}=y"
+            echo "OK: ${OPTION}=y"
           done
 
           if grep -qx 'CONFIG_KERNEL_DEBUG_INFO_REDUCED=y' .config; then
@@ -284,21 +224,15 @@ jobs:
             exit 1
           fi
 
-          echo "BTF and Ftrace build options verified."
-
-      # ========================================
-      # 7. Enable kernel configuration support
-      # ========================================
+          cp .config ../firmware.config
 
       - name: Enable kernel configuration support
         working-directory: immortalwrt
         run: |
-
           KCONFIG="target/linux/x86/64/config-6.12"
 
           test -f "$KCONFIG"
 
-          # Remove existing definitions first
           for SYMBOL in IKCONFIG IKCONFIG_PROC
           do
             sed -i \
@@ -309,65 +243,87 @@ jobs:
             echo "CONFIG_${SYMBOL}=y" >> "$KCONFIG"
           done
 
-          echo "===== Kernel config fragment ====="
           tail -n 15 "$KCONFIG"
 
-      # ========================================
-      # 8. Download sources
-      # ========================================
+      - name: Restore source download cache
+        uses: actions/cache@v4
+        with:
+          path: immortalwrt/dl
+          key: immortalwrt-dl-v25.12.2-x86-64-${{ hashFiles('firmware.config', 'immortalwrt/feeds.conf') }}
+          restore-keys: |
+            immortalwrt-dl-v25.12.2-x86-64-
 
       - name: Download source packages
         working-directory: immortalwrt
         run: |
           make -j8 download V=s
-
-          echo "===== Disk after download ====="
           df -h
-
-      # ========================================
-      # 9. Build firmware and ImageBuilder
-      # ========================================
 
       - name: Compile firmware and ImageBuilder
         working-directory: immortalwrt
         run: |
           set -o pipefail
 
-          make -j"$(nproc)" V=s 2>&1 | tee build.log
+          # Periodic resource and build progress reporting
+          (
+            while true; do
+              sleep 300
 
-          echo "===== Build completed ====="
+              echo "===== Build progress ====="
+              date -u
+              df -h .
+              free -h
+
+              if [ -f build.log ]; then
+                tail -n 5 build.log
+              fi
+            done
+          ) &
+
+          MONITOR_PID=$!
+          trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
+
+          # Keep complete log without flooding the web console
+          if make -j"$(nproc)" V=s > build.log 2>&1; then
+            echo "===== Build completed ====="
+            tail -n 30 build.log
+          else
+            echo "===== Build failed ====="
+            tail -n 200 build.log
+            exit 1
+          fi
+
           df -h
-
-      # ========================================
-      # 10. Verify final kernel configuration
-      # ========================================
 
       - name: Verify final kernel configuration
         working-directory: immortalwrt
         run: |
-
           KCONFIG=$(find build_dir \
             -type f \
             -path '*/linux-6.12*/.config' \
-            | head -n 1)
+            -print -quit)
 
-          if [ -z "$KCONFIG" ]; then
-            echo "ERROR: Kernel .config not found"
-            exit 1
-          fi
+          test -n "$KCONFIG"
 
-          echo "Using: $KCONFIG"
+          echo "Kernel config: $KCONFIG"
 
           for SYMBOL in \
+            BPF \
+            BPF_SYSCALL \
+            BPF_JIT \
+            BPF_EVENTS \
             FTRACE \
             FUNCTION_TRACER \
-            DYNAMIC_FTRACE \
             FUNCTION_GRAPH_TRACER \
+            DYNAMIC_FTRACE \
+            DYNAMIC_FTRACE_WITH_REGS \
+            DYNAMIC_FTRACE_WITH_ARGS \
+            DYNAMIC_FTRACE_WITH_DIRECT_CALLS \
             DEBUG_INFO_BTF \
             IKCONFIG \
             IKCONFIG_PROC \
-            BPF_EVENTS \
             KPROBES \
+            KPROBE_EVENTS \
             PERF_EVENTS
           do
             if ! grep -qx "CONFIG_${SYMBOL}=y" "$KCONFIG"; then
@@ -384,20 +340,15 @@ jobs:
           cp .config ../release/firmware.config
           cp feeds.conf ../release/feeds.conf
 
-          echo "===== Kernel configuration verified ====="
-
-      # ========================================
-      # 11. Collect output files
-      # ========================================
+          grep -x 'CONFIG_TARGET_KERNEL_PARTSIZE=128' .config
+          grep -x 'CONFIG_TARGET_ROOTFS_PARTSIZE=4096' .config
 
       - name: Collect firmware and ImageBuilder
         working-directory: immortalwrt
         run: |
-
           OUT="bin/targets/x86/64"
 
           test -d "$OUT"
-
           mkdir -p ../release
 
           find "$OUT" -maxdepth 1 -type f \
@@ -407,41 +358,64 @@ jobs:
               -o -name '*.manifest' \
               -o -name 'profiles.json' \
               -o -name 'version.buildinfo' \
-              -o -name 'sha256sums' \
             \) \
             -exec cp -v {} ../release/ \;
 
-          if ! ls ../release/*imagebuilder*.tar.zst >/dev/null 2>&1; then
-            echo "ERROR: ImageBuilder archive not generated"
-            exit 1
-          fi
+          IB=$(find ../release \
+            -maxdepth 1 \
+            -name '*imagebuilder*.tar.zst' \
+            -type f -print -quit)
+
+          test -n "$IB"
+          test -s "$IB"
+
+          echo "===== Verify ImageBuilder archive ====="
+          zstd -t "$IB"
+
+          test -n "$(find ../release \
+            -name '*combined*.img.gz' \
+            -type f -print -quit)"
 
           cd ../release
 
-          sha256sum * > SHA256SUMS
+          # GitHub release assets must be smaller than 2 GiB.
+          # Split oversized files into 1 GiB parts.
+          for FILE in *; do
+            [ -f "$FILE" ] || continue
 
-          echo "===== Release files ====="
+            SIZE=$(stat -c%s "$FILE")
+
+            if [ "$SIZE" -ge 2147483648 ]; then
+              echo "Splitting oversized asset: $FILE"
+
+              sha256sum "$FILE" > "$FILE.original-checksum.txt"
+
+              split -b 1024M \
+                -d -a 3 "$FILE" "$FILE.part-"
+
+              rm "$FILE"
+            fi
+          done
+
+          # Only one uniquely named checksum file
+          rm -f sha256sums SHA256SUMS release-checksums.txt
+
+          sha256sum * > release-checksums.txt
+
+          sha256sum -c release-checksums.txt
+
+          echo "===== Final release files ====="
           ls -lh
 
-      # ========================================
-      # 12. Publish GitHub Release
-      # ========================================
-
-      - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-
-          TAG="25.12.2-ftrace-${GITHUB_RUN_NUMBER}-${GITHUB_RUN_ATTEMPT}"
-
-          gh release create "$TAG" release/* \
-            --title "ImmortalWrt ${TAG} x86_64" \
-            --notes "Custom ImmortalWrt 25.12.2 x86_64 build. Includes BTF, Function Tracer, Dynamic Ftrace and standalone ImageBuilder. Experimental: test before deployment." \
-            --prerelease
-
-      # ========================================
-      # 13. Save logs
-      # ========================================
+      - name: Backup firmware and ImageBuilder
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImmortalWrt-Ftrace-Firmware
+          path: release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
 
       - name: Upload build logs
         if: always()
@@ -450,8 +424,63 @@ jobs:
           name: immortalwrt-build-logs
           path: |
             immortalwrt/build.log
-            immortalwrt/.config
+            firmware.config
             immortalwrt/target/linux/x86/64/config-6.12
             release/kernel.config
           if-no-files-found: ignore
           retention-days: 7
+          overwrite: true
+
+  release:
+    name: Publish firmware release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - name: Download compiled firmware
+        uses: actions/download-artifact@v4
+        with:
+          name: ImmortalWrt-Ftrace-Firmware
+          path: release/
+
+      - name: Verify downloaded files
+        run: |
+          cd release
+          ls -lh
+          sha256sum -c release-checksums.txt
+
+      - name: Create and publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          TAG="25.12.2-ftrace-${GITHUB_RUN_NUMBER}"
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --target "$GITHUB_SHA" \
+              --title "ImmortalWrt ${TAG} x86_64" \
+              --notes "Custom ImmortalWrt 25.12.2 with Ftrace, BTF and standalone ImageBuilder. Boot: 128 MiB. Rootfs: 4096 MiB. Test before deployment." \
+              --draft \
+              --prerelease
+          fi
+
+          for FILE in release/*; do
+            [ -f "$FILE" ] || continue
+            echo "Uploading: $FILE"
+
+            gh release upload "$TAG" "$FILE" --clobber
+          done
+
+          gh release edit "$TAG" --draft=false
+
+          echo "===== Release published ====="
+
+          gh release view "$TAG"
