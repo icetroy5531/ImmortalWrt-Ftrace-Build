@@ -67,9 +67,11 @@ jobs:
             libmpfr-dev libreadline-dev \
             ninja-build patch pkgconf qemu-utils \
             swig texinfo u-boot-tools xmlto xxd \
+            genisoimage xorriso \
             lib32gcc-s1 libc6-dev-i386
 
           pahole --version
+          mkisofs --version
 
       # ========================================
       # 4. Clone source
