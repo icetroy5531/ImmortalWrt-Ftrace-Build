@@ -184,8 +184,8 @@ jobs:
           CONFIG_GRUB_EFI_IMAGES=y
           CONFIG_TARGET_IMAGES_GZIP=y
 
-          CONFIG_TARGET_KERNEL_PARTSIZE=64
-          CONFIG_TARGET_ROOTFS_PARTSIZE=1024
+          CONFIG_TARGET_KERNEL_PARTSIZE=128
+          CONFIG_TARGET_ROOTFS_PARTSIZE=4096
 
           # ======================================
           # LuCI
@@ -243,10 +243,15 @@ jobs:
           # Resolve Kconfig dependencies
           make defconfig
 
+
           echo "===== Verify target ====="
           grep -x 'CONFIG_TARGET_x86=y' .config
           grep -x 'CONFIG_TARGET_x86_64=y' .config
           grep -x 'CONFIG_TARGET_DEVICE_x86_64_DEVICE_generic=y' .config
+
+          echo "===== Verify partition size ====="
+          grep -x 'CONFIG_TARGET_KERNEL_PARTSIZE=128' .config
+          grep -x 'CONFIG_TARGET_ROOTFS_PARTSIZE=4096' .config
 
           echo "===== Verify ImageBuilder ====="
           grep -x 'CONFIG_IB=y' .config
