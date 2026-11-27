@@ -231,7 +231,7 @@ jobs:
           echo "===== Verify target ====="
           grep -x 'CONFIG_TARGET_x86=y' .config
           grep -x 'CONFIG_TARGET_x86_64=y' .config
-          grep -x 'CONFIG_TARGET_x86_64_DEVICE_generic=y' .config
+          grep -x 'CONFIG_TARGET_DEVICE_x86_64_DEVICE_generic=y' .config
 
           echo "===== Verify ImageBuilder ====="
           grep -x 'CONFIG_IB=y' .config
