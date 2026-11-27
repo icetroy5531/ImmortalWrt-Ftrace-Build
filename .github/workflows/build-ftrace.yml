@@ -49,10 +49,21 @@ jobs:
       # 3. Install dependencies
       # ========================================
 
+
       - name: Install build dependencies
         run: |
+          # Disable Microsoft's repository
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list
+          sudo rm -f /etc/apt/sources.list.d/vscode.list
+
+          sudo grep -rl 'packages.microsoft.com' \
+            /etc/apt/sources.list.d/ 2>/dev/null |
+            xargs -r sudo rm -f
+
+          # Update Ubuntu repositories
           sudo apt-get update
 
+          # Install ImmortalWrt build dependencies
           sudo apt-get install -y \
             build-essential clang flex bison g++ gawk \
             gcc-multilib g++-multilib gettext git \
@@ -70,8 +81,10 @@ jobs:
             genisoimage xorriso \
             lib32gcc-s1 libc6-dev-i386
 
+          # Verify required tools
           pahole --version
           mkisofs --version
+
 
       # ========================================
       # 4. Clone source
