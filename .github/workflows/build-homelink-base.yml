@@ -1,5 +1,5 @@
 
-name: Build ImmortalWrt 25.12.2 Ftrace
+name: Build HomeLink Base 25.12.2
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ env:
 
 jobs:
   build:
-    name: Build x86_64 Ftrace Firmware
+    name: Build x86_64 HomeLink Base Firmware
     runs-on: ubuntu-24.04
     timeout-minutes: 355
 
