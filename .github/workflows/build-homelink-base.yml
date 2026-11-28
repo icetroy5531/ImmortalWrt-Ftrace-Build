@@ -147,9 +147,6 @@ jobs:
           CONFIG_PACKAGE_bpftool=m
           CONFIG_PACKAGE_bind-dig=m
 
-          CONFIG_PACKAGE_smartdns=m
-          CONFIG_PACKAGE_luci-app-smartdns=m
-          CONFIG_PACKAGE_luci-i18n-smartdns-zh-cn=m
           EOF
 
           # Replace existing values instead of duplicating them
@@ -410,7 +407,7 @@ jobs:
       - name: Backup firmware and ImageBuilder
         uses: actions/upload-artifact@v4
         with:
-          name: ImmortalWrt-Ftrace-Firmware
+          name: HomeLink-Base-Firmware
           path: release/
           if-no-files-found: error
           compression-level: 0
@@ -421,7 +418,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: immortalwrt-build-logs
+          name: homelink-base-build-logs
           path: |
             immortalwrt/build.log
             firmware.config
@@ -445,7 +442,7 @@ jobs:
       - name: Download compiled firmware
         uses: actions/download-artifact@v4
         with:
-          name: ImmortalWrt-Ftrace-Firmware
+          name: HomeLink-Base-Firmware
           path: release/
 
       - name: Verify downloaded files
@@ -461,13 +458,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          TAG="25.12.2-ftrace-${GITHUB_RUN_NUMBER}"
+          TAG="homelink-base-25.12.2-${GITHUB_RUN_NUMBER}"
 
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --target "$GITHUB_SHA" \
-              --title "ImmortalWrt ${TAG} x86_64" \
-              --notes "Custom ImmortalWrt 25.12.2 with Ftrace, BTF and standalone ImageBuilder. Boot: 128 MiB. Rootfs: 4096 MiB. Test before deployment." \
+              --title "HomeLink Base 25.12.2 x86_64 #${GITHUB_RUN_NUMBER}" \
+              --notes "HomeLink Base 25.12.2 x86_64 with Ftrace, BTF, eBPF and standalone ImageBuilder. No optional proxy, DNS, file-sharing or DDNS services are bundled; install them separately after firmware deployment. Boot: 128 MiB. Rootfs: 4096 MiB. Test before deployment." \
               --draft \
               --prerelease
           fi
