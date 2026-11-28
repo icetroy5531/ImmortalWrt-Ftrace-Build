@@ -1,0 +1,483 @@
+
+name: Build HomeLink Base 25.12.2
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REPO_URL: https://github.com/immortalwrt/immortalwrt.git
+  REPO_TAG: v25.12.2
+  RELEASE_URL: https://downloads.immortalwrt.org/releases/25.12.2/targets/x86/64
+
+jobs:
+  build:
+    name: Build x86_64 HomeLink Base Firmware
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/share/boost
+          sudo apt-get clean
+          df -h
+          free -h
+          nproc
+
+      - name: Install build dependencies
+        run: |
+          # Disable unavailable Microsoft repositories
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list
+          sudo rm -f /etc/apt/sources.list.d/vscode.list
+
+          while IFS= read -r file; do
+            sudo rm -f "$file"
+          done < <(
+            grep -rl 'packages.microsoft.com' \
+              /etc/apt/sources.list.d/ 2>/dev/null || true
+          )
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git \
+            libncurses-dev libssl-dev libelf-dev \
+            python3 python3-pip python3-pyelftools \
+            python3-setuptools python3-dev python3-ply \
+            python3-docutils \
+            rsync unzip zlib1g-dev file wget curl \
+            ccache cmake cpio device-tree-compiler \
+            dwarves zstd libzstd-dev \
+            libglib2.0-dev libgmp3-dev libmpc-dev \
+            libmpfr-dev libreadline-dev \
+            ninja-build patch pkgconf qemu-utils \
+            swig texinfo u-boot-tools xmlto xxd \
+            genisoimage xorriso \
+            lib32gcc-s1 libc6-dev-i386
+
+          pahole --version
+          mkisofs --version
+
+      - name: Clone ImmortalWrt source
+        run: |
+          git clone --depth=1 \
+            --branch "$REPO_TAG" \
+            "$REPO_URL" immortalwrt
+
+          cd immortalwrt
+          git describe --tags --always
+          git rev-parse HEAD
+
+      - name: Install pinned feeds
+        working-directory: immortalwrt
+        run: |
+          wget -qO feeds.conf \
+            "$RELEASE_URL/feeds.buildinfo"
+
+          cat feeds.conf
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure firmware
+        working-directory: immortalwrt
+        run: |
+          wget -qO .config \
+            "$RELEASE_URL/config.buildinfo"
+
+          cat > custom.config <<'EOF'
+          CONFIG_IB=y
+          CONFIG_IB_STANDALONE=y
+
+          CONFIG_KERNEL_DEBUG_INFO=y
+          # CONFIG_KERNEL_DEBUG_INFO_REDUCED is not set
+          CONFIG_KERNEL_DEBUG_INFO_BTF=y
+
+          CONFIG_KERNEL_FTRACE=y
+          CONFIG_KERNEL_FUNCTION_TRACER=y
+          CONFIG_KERNEL_DYNAMIC_FTRACE=y
+          CONFIG_KERNEL_FUNCTION_GRAPH_TRACER=y
+
+          CONFIG_KERNEL_DEBUG_FS=y
+          CONFIG_KERNEL_BPF_EVENTS=y
+          CONFIG_KERNEL_KPROBES=y
+          CONFIG_KERNEL_PERF_EVENTS=y
+          CONFIG_DWARVES=y
+
+          CONFIG_TARGET_ROOTFS_EXT4FS=y
+          CONFIG_TARGET_ROOTFS_SQUASHFS=y
+          CONFIG_GRUB_IMAGES=y
+          CONFIG_GRUB_EFI_IMAGES=y
+          CONFIG_TARGET_IMAGES_GZIP=y
+
+          CONFIG_TARGET_KERNEL_PARTSIZE=128
+          CONFIG_TARGET_ROOTFS_PARTSIZE=4096
+
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-ssl=y
+          CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+
+          CONFIG_PACKAGE_ppp=y
+          CONFIG_PACKAGE_ppp-mod-pppoe=y
+          CONFIG_PACKAGE_kmod-pppoe=y
+
+          CONFIG_PACKAGE_odhcp6c=y
+          CONFIG_PACKAGE_odhcpd-ipv6only=y
+
+          CONFIG_PACKAGE_kmod-wireguard=y
+          CONFIG_PACKAGE_wireguard-tools=y
+          CONFIG_PACKAGE_luci-proto-wireguard=y
+
+          CONFIG_PACKAGE_kmod-nft-tproxy=y
+          CONFIG_PACKAGE_kmod-nft-socket=y
+          CONFIG_PACKAGE_kmod-nft-queue=y
+
+          CONFIG_PACKAGE_ip-full=y
+          CONFIG_PACKAGE_tcpdump=m
+          CONFIG_PACKAGE_bpftool=m
+          CONFIG_PACKAGE_bind-dig=m
+
+          EOF
+
+          # Replace existing values instead of duplicating them
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          config = Path(".config")
+          original = config.read_text().splitlines()
+          custom = Path("custom.config").read_text().splitlines()
+
+          def symbol(line):
+              m = re.match(
+                  r"^(?:# )?(CONFIG_[A-Za-z0-9_.+\-]+)"
+                  r"(?:=| is not set$)", line
+              )
+              return m.group(1) if m else None
+
+          overrides = {
+              symbol(line): line
+              for line in custom
+              if symbol(line)
+          }
+
+          result = [
+              line for line in original
+              if symbol(line) not in overrides
+          ]
+
+          result.extend(overrides.values())
+          config.write_text("\n".join(result) + "\n")
+          PY
+
+          make defconfig
+
+          echo "===== Verify target ====="
+          grep -x 'CONFIG_TARGET_x86=y' .config
+          grep -x 'CONFIG_TARGET_x86_64=y' .config
+          grep -x 'CONFIG_TARGET_DEVICE_x86_64_DEVICE_generic=y' .config
+
+          echo "===== Verify partition size ====="
+          grep -x 'CONFIG_TARGET_KERNEL_PARTSIZE=128' .config
+          grep -x 'CONFIG_TARGET_ROOTFS_PARTSIZE=4096' .config
+
+          echo "===== Verify ImageBuilder ====="
+          grep -x 'CONFIG_IB=y' .config
+          grep -x 'CONFIG_IB_STANDALONE=y' .config
+
+          echo "===== Verify BTF and Ftrace ====="
+
+          for OPTION in \
+            CONFIG_KERNEL_DEBUG_INFO \
+            CONFIG_KERNEL_DEBUG_INFO_BTF \
+            CONFIG_KERNEL_FTRACE \
+            CONFIG_KERNEL_FUNCTION_TRACER \
+            CONFIG_KERNEL_DYNAMIC_FTRACE \
+            CONFIG_KERNEL_FUNCTION_GRAPH_TRACER \
+            CONFIG_KERNEL_DEBUG_FS \
+            CONFIG_KERNEL_BPF_EVENTS \
+            CONFIG_KERNEL_KPROBES \
+            CONFIG_KERNEL_PERF_EVENTS
+          do
+            if ! grep -qx "${OPTION}=y" .config; then
+              echo "ERROR: ${OPTION} is not enabled"
+              exit 1
+            fi
+            echo "OK: ${OPTION}=y"
+          done
+
+          if grep -qx 'CONFIG_KERNEL_DEBUG_INFO_REDUCED=y' .config; then
+            echo "ERROR: Reduced debug info must be disabled"
+            exit 1
+          fi
+
+          cp .config ../firmware.config
+
+      - name: Enable kernel configuration support
+        working-directory: immortalwrt
+        run: |
+          KCONFIG="target/linux/x86/64/config-6.12"
+
+          test -f "$KCONFIG"
+
+          for SYMBOL in IKCONFIG IKCONFIG_PROC
+          do
+            sed -i \
+              -e "/^CONFIG_${SYMBOL}=/d" \
+              -e "/^# CONFIG_${SYMBOL} is not set$/d" \
+              "$KCONFIG"
+
+            echo "CONFIG_${SYMBOL}=y" >> "$KCONFIG"
+          done
+
+          tail -n 15 "$KCONFIG"
+
+      - name: Restore source download cache
+        uses: actions/cache@v4
+        with:
+          path: immortalwrt/dl
+          key: immortalwrt-dl-v25.12.2-x86-64-${{ hashFiles('firmware.config', 'immortalwrt/feeds.conf') }}
+          restore-keys: |
+            immortalwrt-dl-v25.12.2-x86-64-
+
+      - name: Download source packages
+        working-directory: immortalwrt
+        run: |
+          make -j8 download V=s
+          df -h
+
+      - name: Compile firmware and ImageBuilder
+        working-directory: immortalwrt
+        run: |
+          set -o pipefail
+
+          # Periodic resource and build progress reporting
+          (
+            while true; do
+              sleep 300
+
+              echo "===== Build progress ====="
+              date -u
+              df -h .
+              free -h
+
+              if [ -f build.log ]; then
+                tail -n 5 build.log
+              fi
+            done
+          ) &
+
+          MONITOR_PID=$!
+          trap 'kill "$MONITOR_PID" 2>/dev/null || true' EXIT
+
+          # Keep complete log without flooding the web console
+          if make -j"$(nproc)" V=s > build.log 2>&1; then
+            echo "===== Build completed ====="
+            tail -n 30 build.log
+          else
+            echo "===== Build failed ====="
+            tail -n 200 build.log
+            exit 1
+          fi
+
+          df -h
+
+      - name: Verify final kernel configuration
+        working-directory: immortalwrt
+        run: |
+          KCONFIG=$(find build_dir \
+            -type f \
+            -path '*/linux-6.12*/.config' \
+            -print -quit)
+
+          test -n "$KCONFIG"
+
+          echo "Kernel config: $KCONFIG"
+
+          for SYMBOL in \
+            BPF \
+            BPF_SYSCALL \
+            BPF_JIT \
+            BPF_EVENTS \
+            FTRACE \
+            FUNCTION_TRACER \
+            FUNCTION_GRAPH_TRACER \
+            DYNAMIC_FTRACE \
+            DYNAMIC_FTRACE_WITH_REGS \
+            DYNAMIC_FTRACE_WITH_ARGS \
+            DYNAMIC_FTRACE_WITH_DIRECT_CALLS \
+            DEBUG_INFO_BTF \
+            IKCONFIG \
+            IKCONFIG_PROC \
+            KPROBES \
+            KPROBE_EVENTS \
+            PERF_EVENTS
+          do
+            if ! grep -qx "CONFIG_${SYMBOL}=y" "$KCONFIG"; then
+              echo "ERROR: CONFIG_${SYMBOL} is missing"
+              exit 1
+            fi
+
+            echo "OK: CONFIG_${SYMBOL}=y"
+          done
+
+          mkdir -p ../release
+
+          cp "$KCONFIG" ../release/kernel.config
+          cp .config ../release/firmware.config
+          cp feeds.conf ../release/feeds.conf
+
+          grep -x 'CONFIG_TARGET_KERNEL_PARTSIZE=128' .config
+          grep -x 'CONFIG_TARGET_ROOTFS_PARTSIZE=4096' .config
+
+      - name: Collect firmware and ImageBuilder
+        working-directory: immortalwrt
+        run: |
+          OUT="bin/targets/x86/64"
+
+          test -d "$OUT"
+          mkdir -p ../release
+
+          find "$OUT" -maxdepth 1 -type f \
+            \( \
+              -name '*imagebuilder*.tar.zst' \
+              -o -name '*combined*.img.gz' \
+              -o -name '*.manifest' \
+              -o -name 'profiles.json' \
+              -o -name 'version.buildinfo' \
+            \) \
+            -exec cp -v {} ../release/ \;
+
+          IB=$(find ../release \
+            -maxdepth 1 \
+            -name '*imagebuilder*.tar.zst' \
+            -type f -print -quit)
+
+          test -n "$IB"
+          test -s "$IB"
+
+          echo "===== Verify ImageBuilder archive ====="
+          zstd -t "$IB"
+
+          test -n "$(find ../release \
+            -name '*combined*.img.gz' \
+            -type f -print -quit)"
+
+          cd ../release
+
+          # GitHub release assets must be smaller than 2 GiB.
+          # Split oversized files into 1 GiB parts.
+          for FILE in *; do
+            [ -f "$FILE" ] || continue
+
+            SIZE=$(stat -c%s "$FILE")
+
+            if [ "$SIZE" -ge 2147483648 ]; then
+              echo "Splitting oversized asset: $FILE"
+
+              sha256sum "$FILE" > "$FILE.original-checksum.txt"
+
+              split -b 1024M \
+                -d -a 3 "$FILE" "$FILE.part-"
+
+              rm "$FILE"
+            fi
+          done
+
+          # Only one uniquely named checksum file
+          rm -f sha256sums SHA256SUMS release-checksums.txt
+
+          sha256sum * > release-checksums.txt
+
+          sha256sum -c release-checksums.txt
+
+          echo "===== Final release files ====="
+          ls -lh
+
+      - name: Backup firmware and ImageBuilder
+        uses: actions/upload-artifact@v4
+        with:
+          name: HomeLink-Base-Firmware
+          path: release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+          overwrite: true
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: homelink-base-build-logs
+          path: |
+            immortalwrt/build.log
+            firmware.config
+            immortalwrt/target/linux/x86/64/config-6.12
+            release/kernel.config
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
+
+  release:
+    name: Publish firmware release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    permissions:
+      contents: write
+      actions: read
+
+    steps:
+      - name: Download compiled firmware
+        uses: actions/download-artifact@v4
+        with:
+          name: HomeLink-Base-Firmware
+          path: release/
+
+      - name: Verify downloaded files
+        run: |
+          cd release
+          ls -lh
+          sha256sum -c release-checksums.txt
+
+      - name: Create and publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          TAG="homelink-base-25.12.2-${GITHUB_RUN_NUMBER}"
+
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --target "$GITHUB_SHA" \
+              --title "HomeLink Base 25.12.2 x86_64 #${GITHUB_RUN_NUMBER}" \
+              --notes "HomeLink Base 25.12.2 x86_64 with Ftrace, BTF, eBPF and standalone ImageBuilder. No optional proxy, DNS, file-sharing or DDNS services are bundled; install them separately after firmware deployment. Boot: 128 MiB. Rootfs: 4096 MiB. Test before deployment." \
+              --draft \
+              --prerelease
+          fi
+
+          for FILE in release/*; do
+            [ -f "$FILE" ] || continue
+            echo "Uploading: $FILE"
+
+            gh release upload "$TAG" "$FILE" --clobber
+          done
+
+          gh release edit "$TAG" --draft=false
+
+          echo "===== Release published ====="
+
+          gh release view "$TAG"
